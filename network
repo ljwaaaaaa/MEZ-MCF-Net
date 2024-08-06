@@ -1,0 +1,89 @@
+import keras
+import numpy as np
+import datetime
+import tensorflow as tf
+import scipy.io as scio
+from keras.models import Model, load_model
+from keras.layers import Input, Conv2D, MaxPooling2D, Dense, subtract, \
+    multiply, Lambda, Flatten, add, Reshape, UpSampling2D, Dropout, concatenate, GlobalAveragePooling2D
+import sklearn.metrics
+import keras.backend as K
+import keras.regularizers
+from keras.optimizers import Adam
+
+
+def GlobalFeature(X):
+    Mean = Lambda(lambda x: K.mean(x, axis=[1, 2], keepdims=True))(X)
+    Ones = Lambda(lambda x: K.ones_like(x))(Mean)
+    Mean = add([Mean, Ones * 1e-7])
+    Mean = Reshape(target_shape=[1, Mean.shape[-1].value])(Mean)
+
+    H = Lambda(lambda x: K.log(x))(X)
+    H = multiply([X, -1 * H])
+    H = Lambda(lambda x: K.sum(x, axis=[1, 2]))(H)
+    H = Reshape(target_shape=[1, H.shape[-1].value])(H)
+
+    Mean1 = Lambda(lambda x: K.mean(x, axis=[1, 2], keepdims=True))(X)
+    Square = Lambda(lambda x: K.square(x - Mean1))(X)
+    Var = Lambda(lambda x: K.mean(x, axis=[1, 2], keepdims=True))(Square)
+    Std = Lambda(lambda x: K.sqrt(x))(Var)
+    # 计算 Z 分数
+    Z_Score = Lambda(lambda x: (x - Mean1) / (Std + K.epsilon()))(X)
+    Z_Score = Lambda(lambda x: K.sum(x, axis=[1, 2]))(Z_Score)
+    Z_Score = Reshape(target_shape=[1, Z_Score.shape[-1].value])(Z_Score)
+
+    Y = [Mean, H, Z_Score]
+    Y = Lambda(lambda x: K.concatenate(x, axis=1))(Y)
+    Y = Reshape(target_shape=[3, 1, Y.shape[-1].value])(Y)
+    Y = Conv2D(Y.shape[-1].value, (3, 1), activation='relu', padding='valid')(Y)
+    return Y
+
+
+def BottleNeck(y, d=(16, 1)):
+    node1 = y.shape[-1].value
+    y = Flatten()(y)
+    y = Dense(round(node1 / d[0]), activation='relu')(y)
+    y = Dense(round(node1 / d[-1]), activation='sigmoid')(y)
+    return y
+
+
+def CNN(input_shape=(15, 15, 3), classes=13, d=(4, 1)):
+    input = Input(shape=input_shape)
+
+    shallow_fea_1 = Conv2D(32, (3, 3), activation='relu', padding='same')(input)
+    shallow_fea_2 = Conv2D(32, (5, 5), activation='relu', padding='same')(input)
+    shallow_fea_3 = Conv2D(32, (7, 7), activation='relu', padding='same')(input)
+    fused_features_shallow = concatenate([shallow_fea_1, shallow_fea_2, shallow_fea_3], axis=-1)
+
+    GF1 = Lambda(GlobalFeature)(fused_features_shallow)
+    GF1 = BottleNeck(GF1, d)
+    fused_features_shallow = multiply([fused_features_shallow, GF1])
+
+    x = MaxPooling2D((2, 2), padding='same')(fused_features_shallow)
+
+    mid_fea_1 = Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+    mid_fea_2 = Conv2D(64, (5, 5), activation='relu', padding='same')(x)
+    mid_fea_3 = Conv2D(64, (7, 7), activation='relu', padding='same')(x)
+    fused_features_middle = concatenate([mid_fea_1, mid_fea_2, mid_fea_3], axis=-1)
+
+    GF2 = Lambda(GlobalFeature)(fused_features_middle)
+    GF2 = BottleNeck(GF2, d)
+    fused_features_middle = multiply([fused_features_middle, GF2])
+
+    x = MaxPooling2D((2, 2), padding='same')(fused_features_middle)
+
+    deep_fea_1 = Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+    deep_fea_2 = Conv2D(128, (5, 5), activation='relu', padding='same')(x)
+    deep_fea_3 = Conv2D(128, (7, 7), activation='relu', padding='same')(x)
+    fused_features_deep = concatenate([deep_fea_1, deep_fea_2, deep_fea_3], axis=-1)
+
+    pool_deep = GlobalAveragePooling2D()(fused_features_deep)
+
+    # 特征拼接和全连接层
+    feas = pool_deep
+    x = Dense(512, activation='relu', activity_regularizer=keras.regularizers.l2(0.0001))(feas)
+    x = Dropout(0.4)(x)
+    output = Dense(classes, activation='softmax')(x)
+
+    model = Model(inputs=input, outputs=output)
+    return model
